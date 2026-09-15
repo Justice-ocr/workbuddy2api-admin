@@ -643,7 +643,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		aggregateStats := newChatStatsReaderSince(rc, st.start)
 		resp, err := upstream.Aggregate(aggregateStats)
-		st.ttfb = aggregateStats.TTFB()
 		input, output = aggregateStats.inputCount, aggregateStats.outputCount
 		if credit, ok := aggregateStats.Credit(); ok {
 			charge = &credit
