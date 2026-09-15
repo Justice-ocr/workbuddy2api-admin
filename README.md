@@ -2,11 +2,11 @@
   <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API</h1>
+<h1 align="center">WorkBuddy2API Admin</h1>
 
 <p align="center">
-  <b>把 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
-  OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 积分补充
+  <b>支持 WorkBuddy 国际版网页登录的 OpenAI 兼容网关与管理面板</b><br>
+  国际版 OAuth · 独立管理鉴权 · 账号管理 · 流式 API · Docker 部署
 </p>
 
 <p align="center">
@@ -20,6 +20,110 @@
 ---
 
 ## 项目简介
+
+本仓库基于 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，在保留上游国内版 / 国际版 API 和账号池能力的基础上增加独立 Web 管理面板。默认开发分支为 `admin-panel`。下方 Wiki 链接指向上游文档，管理面板以本页说明及本仓库源码为准。
+
+## Web 管理面板
+
+- **国际版登录**：面板使用 `www.workbuddy.ai` 的 OAuth 设备授权流程，支持授权轮询、取消、凭据安全保存及即时加入账号池；不会退回国内登录入口。
+- **账号管理**：查看状态、刷新凭据、停用、恢复、二次确认删除。重复添加已有账号不会覆盖原凭据。
+- **运行管理**：查看模型列表、基础运行状态及管理操作事件，修改并持久化业务 API Key。日志页不是完整的业务请求日志。
+- **独立鉴权**：管理 Token 与业务 API Key 分离；普通 API Key 无管理权限。管理 Token 为空时，管理服务不启动。
+- **访问隔离**：默认管理地址 `127.0.0.1:7864`；检查 Host、Origin 和管理请求头。推荐通过 SSH 隧道访问，不支持直接使用公网域名访问管理页。
+- **范围说明**：面板目前只提供 `global` 国际版登录；国内版仍可使用上游 CLI 流程。
+
+### Docker 部署管理版
+
+需要 Docker Engine 和 Compose。下面使用独立可写数据目录，避免单文件只读挂载阻止面板原子保存配置。
+
+```bash
+git clone --branch admin-panel https://github.com/Justice-ocr/workbuddy2api-admin.git
+cd workbuddy2api-admin
+mkdir -p runtime/auths runtime/data
+cp config.example.json runtime/config.json
+umask 077
+openssl rand -hex 32 > runtime/admin-token
+```
+
+编辑 `runtime/config.json`，保留其他配置，设置以下字段：
+
+```json
+{
+  "listen": ":7863",
+  "api_key": "REPLACE_WITH_A_SEPARATE_RANDOM_API_KEY",
+  "auth_dir": "/app/runtime/auths",
+  "state_file": "/app/runtime/data/state.json",
+  "admin_listen": "0.0.0.0:7864",
+  "admin_token": "",
+  "admin_token_file": "/app/runtime/admin-token",
+  "admin_allow_container_bind": true,
+  "global": {
+    "enabled": true,
+    "chat_base": "",
+    "billing_base": ""
+  }
+}
+```
+
+业务 API Key 必须另行生成，不能与管理 Token 相同。根据需要关闭示例配置中的自动任务。
+
+创建 `compose.admin.yml`：
+
+```yaml
+services:
+  workbuddy:
+    build: .
+    container_name: workbuddy2api
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:7863:7863"
+      - "127.0.0.1:7864:7864"
+    volumes:
+      - ./runtime:/app/runtime
+    entrypoint: ["/app/wb2api", "-config", "/app/runtime/config.json"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+```
+
+```bash
+sudo chown -R 10001:10001 runtime
+sudo chmod 700 runtime runtime/auths runtime/data
+sudo chmod 600 runtime/config.json runtime/admin-token
+docker compose -f compose.admin.yml up -d --build
+```
+
+容器内管理服务绑定 `0.0.0.0` 是 Docker 端口映射所需的显式例外；**宿主机仍只发布到 `127.0.0.1`，不要改成公网监听**。不要同时启动仓库内另一份 Compose 来争用相同容器名和端口。
+
+在自己的电脑建立隧道：
+
+```bash
+ssh -N -L 7864:127.0.0.1:7864 user@your-server
+```
+
+浏览器打开 `http://127.0.0.1:7864/`，输入服务器 `runtime/admin-token` 中的独立管理 Token，再点击添加国际版账号。令牌不要公开或提交进 Git。
+
+### 公网 API 与升级
+
+- 公网 HTTPS 反向代理只转发业务端口 `7863` 的 `/v1/models` 和 `/v1/chat/completions`；不要转发管理端口 `7864`。
+- 国际版模型使用 `/v1/models` 返回的 `global:` 前缀，例如 `global:glm-5.2`，实际可用性由账号与上游决定。
+- 升级前备份配置、账号及状态目录，停止旧实例再迁移；不要让两个实例同时刷新同一份账号凭据。
+- 保留原 `api_key`、账号文件和模型前缀即可尽量减少客户端改动；新增独立管理 Token。
+- 空账号池可能使 `/healthz` 返回不健康；需要完成账号授权后再验证真实对话。
+
+### 开发验证
+
+```bash
+go test ./cmd/server ./internal/auth ./internal/pool ./internal/server
+go build ./cmd/server
+```
+
+新增安全测试覆盖管理鉴权与访问限制。生产上线仍需验证实际 OAuth 授权、账号持久化、普通及流式 API；不能仅凭模型列表返回成功判断上游可用。
+
+## 上游网关介绍
 
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
 
@@ -113,8 +217,8 @@ flowchart LR
 ### Docker Compose 一键部署
 
 ```bash
-git clone https://github.com/Sliverkiss/workbuddy2api.git
-cd workbuddy2api
+git clone --branch admin-panel https://github.com/Justice-ocr/workbuddy2api-admin.git
+cd workbuddy2api-admin
 cp config.example.json config.json
 ```
 
