@@ -35,9 +35,6 @@ func (c *Config) validateAdmin() error {
 	if c.AdminToken == c.APIKey {
 		return errors.New("admin token must differ from API key")
 	}
-	if !c.Global.Enabled {
-		return errors.New("admin panel requires global.enabled=true")
-	}
 	if !loopbackHost(c.AdminListen) {
 		host, port, err := net.SplitHostPort(c.AdminListen)
 		if !c.AdminAllowContainerBind || err != nil || host != "0.0.0.0" || !loopbackHost(net.JoinHostPort("127.0.0.1", port)) {

@@ -1,9 +1,36 @@
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
+  const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
+  let themeMode = 'system', accent = 'mint';
+  try {
+    const saved = JSON.parse(localStorage.getItem('wb-admin-appearance') || '{}');
+    if (['light', 'dark', 'system'].includes(saved.mode)) themeMode = saved.mode;
+    if (['mint', 'blue', 'rose'].includes(saved.accent)) accent = saved.accent;
+  } catch {}
+  function applyAppearance() {
+    document.documentElement.dataset.theme = themeMode === 'system' ? (systemTheme.matches ? 'dark' : 'light') : themeMode;
+    document.documentElement.dataset.accent = accent;
+    document.querySelectorAll('[data-theme-mode]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.themeMode === themeMode)));
+    document.querySelectorAll('[data-color]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.color === accent)));
+  }
+  function saveAppearance() {
+    applyAppearance();
+    // Store appearance preferences only; credentials remain in memory.
+    try { localStorage.setItem('wb-admin-appearance', JSON.stringify({ mode: themeMode, accent })); } catch {}
+  }
+  systemTheme.addEventListener('change', applyAppearance);
+  document.querySelectorAll('[data-theme-mode]').forEach(b => b.addEventListener('click', () => { themeMode = b.dataset.themeMode; saveAppearance(); }));
+  document.querySelectorAll('[data-color]').forEach(b => b.addEventListener('click', () => { accent = b.dataset.color; saveAppearance(); }));
+  $('appearance').addEventListener('click', () => $('appearanceDialog').showModal());
+  applyAppearance();
   let token = '', accounts = [], models = [], view = 'accounts', generation = 0;
   let oauthID = null, oauthTimer = null, toastTimer = null, deleteTarget = null;
   let lastActivity = Date.now();
+  let usagePage = 1;
+  let oauthAttempt = 0;
+  let usageAttempt = 0;
+  $('usageDate').value = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
   const icons = () => window.lucide.createIcons({ attrs: { 'aria-hidden': 'true' } });
   const node = (tag, text, cls) => {
     const el = document.createElement(tag);
@@ -48,8 +75,14 @@
     cancelOAuth();
     token = ''; generation++; accounts = []; models = [];
     $('accountRows').replaceChildren(); $('modelRows').replaceChildren(); $('logRows').replaceChildren();
+    $('usageRows').replaceChildren(); $('taskRows').replaceChildren();
+    $('taskAccount').replaceChildren();
+    $('usageSummary').textContent = ''; $('taskMessage').textContent = '';
+    $('deleteAccount').textContent = ''; $('deleteUID').value = ''; deleteTarget = null;
+    $('authLink').removeAttribute('href');
     $('newKey').value = ''; $('repeatKey').value = ''; $('connection').textContent = '未认证';
     $('deleteDialog').close(); $('loginDialog').close();
+    $('appearanceDialog').close();
     if (!$('authDialog').open) $('authDialog').showModal();
     $('adminToken').value = ''; $('adminToken').focus();
   }
@@ -112,6 +145,10 @@
   }
   async function refreshOverview() {
     const x = await api('overview'); accounts = x.accounts || [];
+    const selected = $('taskAccount').value;
+    $('taskAccount').replaceChildren();
+    accounts.forEach(a => { const o = node('option', `${a.nickname || a.uid} · ${a.realm}`); o.value = a.uid; $('taskAccount').append(o); });
+    if (accounts.some(a => a.uid === selected)) $('taskAccount').value = selected;
     for (const key of ['total', 'healthy', 'cooling', 'disabled']) $(key).textContent = x[key];
     $('navCount').textContent = x.total; renderAccounts();
     $('updatedAt').textContent = `最近更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
@@ -145,6 +182,7 @@
     } catch (err) { $('deleteError').textContent = `${err.message}，请关闭后重新确认`; }
   });
   function cancelOAuth() {
+    oauthAttempt++;
     clearTimeout(oauthTimer);
     const id = oauthID; oauthID = null;
     if (id && token) api('login/cancel', { id }).catch(() => {});
@@ -154,15 +192,20 @@
     $('loginStatus').textContent = '正在获取授权入口';
     if (!$('loginDialog').open) $('loginDialog').showModal();
     const mark = generation;
+    const attempt = oauthAttempt;
     try {
-      const x = await api('login/start', { realm: 'global' });
+      const realm = $('loginRealm').value;
+      const x = await api('login/start', { realm });
+      if (attempt !== oauthAttempt) { api('login/cancel', {id:x.id}).catch(()=>{}); return; }
       const u = new URL(x.url);
-      if (u.protocol !== 'https:' || u.host !== 'www.workbuddy.ai' || u.username || u.password) throw new Error('授权域名校验失败');
+      const hosts = realm === 'cn' ? ['copilot.tencent.com', 'www.codebuddy.cn'] : ['www.workbuddy.ai'];
+      if (u.protocol !== 'https:' || !hosts.includes(u.host) || u.username || u.password) throw new Error('授权域名校验失败');
       oauthID = x.id;
       if (!$('loginDialog').open || mark !== generation) { cancelOAuth(); return; }
       $('authLink').href = u.href; $('authLink').hidden = false;
       $('loginStatus').textContent = '等待浏览器授权'; pollOAuth(x.id, Date.now() + 900000, 0);
     } catch (e) {
+      if (attempt !== oauthAttempt || mark !== generation) return;
       $('loginStatus').textContent = e.message; $('retryLogin').hidden = false;
     }
   }
@@ -174,7 +217,7 @@
         const result = await api('login/poll', { id });
         if (oauthID !== id) return;
         if (result.done) {
-          oauthID = null; $('loginDialog').close(); toast('国际版账号已添加'); await refreshOverview(); return;
+          oauthID = null; $('loginDialog').close(); toast('账号已添加'); await refreshOverview(); return;
         }
         $('loginStatus').textContent = '等待浏览器授权'; pollOAuth(id, expires, 0);
       } catch (e) {
@@ -188,6 +231,7 @@
   }
   $('addAccount').addEventListener('click', () => busy($('addAccount'), beginOAuth));
   $('retryLogin').addEventListener('click', () => busy($('retryLogin'), beginOAuth));
+  $('loginRealm').addEventListener('change', () => busy($('addAccount'), beginOAuth));
   $('loginDialog').addEventListener('close', cancelOAuth);
   document.querySelectorAll('.close-dialog').forEach(b => b.addEventListener('click', () => $(b.dataset.dialog).close()));
 
@@ -219,6 +263,8 @@
   $('refreshLogs').addEventListener('click', e => busy(e.currentTarget, refreshLogs));
   async function loadView() {
     if (!token) return;
+    if (view === 'usage') { await refreshUsage(); return; }
+    if (view === 'tasks') { await refreshOverview(); return; }
     if (view === 'models') await refreshModels();
     else if (view === 'logs') await refreshLogs();
     else await refreshOverview();
@@ -229,7 +275,7 @@
     document.querySelectorAll('[data-view]').forEach(el => {
       el.classList.toggle('active', el === button); if (el === button) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
     });
-    $('breadcrumb').textContent = ({ accounts: '账号管理', models: '模型目录', logs: '运行日志', settings: '接口密钥' })[view];
+    $('breadcrumb').textContent = ({ accounts: '账号管理', models: '模型目录', logs: '运行日志', settings: '接口密钥', usage:'使用日志',tasks:'积分任务' })[view];
     try { await loadView(); } catch (e) { toast(e.message); }
   }));
   $('keyForm').addEventListener('submit', async e => {
@@ -244,5 +290,39 @@
     } catch (err) { $('keyMessage').textContent = err.message; }
     finally { $('newKey').value = ''; $('repeatKey').value = ''; $('saveKey').disabled = false; }
   });
+  async function refreshUsage() {
+    const attempt = ++usageAttempt;
+    const q = new URLSearchParams({ page:String(usagePage),date:$('usageDate').value,uid:$('usageUID').value.trim(),model:$('usageModel').value,result:$('usageResult').value });
+    const x = await api(`usage?${q}`);
+    if (attempt !== usageAttempt) return;
+    $('usageSummary').textContent = `${x.total} 次请求 · ${x.tokens} 已知 Token · ${x.credit.toFixed(3)} 已知积分 · ${x.unknown_credit} 次积分未知${x.persisted?'':' · 警告：持久化失败'}`;
+    $('usageRows').replaceChildren();
+    x.rows.forEach(r => {
+      const tr=node('tr');
+      tr.append(node('td',new Date(r.time).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'})),
+        node('td',`${r.model} / ${r.uid || '--'}`),node('td',`${r.mode} / ${r.status}${r.interrupted?' 中断':''}`),
+        node('td',`${r.input_tokens ?? '--'} / ${r.output_tokens ?? '--'}`),node('td',r.credit ?? '--'),
+        node('td',`${r.ttfb_ms || '--'} / ${r.duration_ms} ms`));
+      $('usageRows').append(tr);
+    });
+    $('usagePage').textContent=`${usagePage} / ${Math.max(1,Math.ceil(x.total/50))}`;
+    $('usagePrev').disabled=usagePage<=1;$('usageNext').disabled=usagePage*50>=x.total;
+  }
+  $('refreshUsage').addEventListener('click',e=>busy(e.currentTarget,async()=>{usagePage=1;await refreshUsage();}));
+  $('usagePrev').addEventListener('click',async()=>{if(usagePage<=1)return;usagePage--;try{await refreshUsage();}catch(e){usagePage++;toast(e.message);}});
+  $('usageNext').addEventListener('click',async()=>{usagePage++;try{await refreshUsage();}catch(e){usagePage--;toast(e.message);}});
+  $('refreshTasks').addEventListener('click',e=>busy(e.currentTarget,async()=>{
+    const uid = $('taskAccount').value;
+    if (!uid) { toast('请先添加账号'); return; }
+    $('taskRows').replaceChildren();$('taskMessage').textContent='正在查询';
+    try {
+      const x=await api('tasks',{uid});
+      if ($('taskAccount').value !== uid) return;
+      $('taskMessage').textContent=`查询于 ${new Date(x.queried_at).toLocaleString()} · 当前任务快照，当日完成归属尚未验证`;
+      const status={not_accepted:'未接受',accepted:'进行中',completed:'已完成',claimed:'已领取'};
+      x.tasks.forEach(t=>{const tr=node('tr');tr.append(node('td',t.name||t.task_code),node('td',status[t.accept_status]||'未知'),node('td',`${t.progress.current} / ${t.progress.target}`));$('taskRows').append(tr);});
+    } catch(err){$('taskMessage').textContent=err.message;}
+  }));
+  $('taskAccount').addEventListener('change',()=>{$('taskRows').replaceChildren();$('taskMessage').textContent='';});
   icons(); lock();
 })();

@@ -26,10 +26,11 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	RecordUsage func(UsageRecord)
+	Pool        *pool.Pool
+	Upstream    *upstream.Client
+	APIKey      string // 空 = 不鉴权
+	MaxRotate   int    // 单请求最多换号次数，默认 3
 	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
 	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
 	MaxBodyBytes int64
@@ -388,6 +389,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	var input, output *int
+	var charge *float64
+	interrupted := false
+	defer func() {
+		if h.cfg.RecordUsage != nil {
+			model := peek.Model
+			if len(model) > 128 {
+				model = "[invalid model]"
+			}
+			h.cfg.RecordUsage(UsageRecord{Time: st.start, Model: model, UID: st.uid, Mode: st.mode, Status: st.status,
+				DurationMS: time.Since(st.start).Milliseconds(), TTFBMS: st.ttfb.Milliseconds(),
+				Input: input, Output: output, Credit: charge, Interrupted: interrupted})
+		}
+	}()
 	defer st.done()
 
 	tried := map[string]bool{}
@@ -608,12 +623,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
-			_ = upstream.Stream(w, stats)
+			streamErr := upstream.Stream(w, stats)
+			interrupted = streamErr != nil || r.Context().Err() != nil
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
+			input, output = stats.inputCount, stats.outputCount
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
 			if credit, ok := stats.Credit(); ok {
+				charge = &credit
 				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, stats.TotalTokens())
 			} else if _, hasUsage := stats.Tokens(); hasUsage {
 				// R9(c) 防护观测：usage 存在但 credit 缺失（如 global SSE 末帧未带 credit）。
@@ -623,7 +641,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			rc.Close()
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		aggregateStats := newChatStatsReaderSince(rc, st.start)
+		resp, err := upstream.Aggregate(aggregateStats)
+		st.ttfb = aggregateStats.TTFB()
+		input, output = aggregateStats.inputCount, aggregateStats.outputCount
+		if credit, ok := aggregateStats.Credit(); ok {
+			charge = &credit
+		}
+		interrupted = r.Context().Err() != nil
 		rc.Close()
 		if err != nil {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
@@ -636,6 +661,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.toks = completionTokens(resp)
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
+			charge = &credit
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
 		return

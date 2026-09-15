@@ -25,10 +25,11 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-//go:embed admin.html admin.css admin.js admin-icons.js
+//go:embed admin.html admin.css admin-theme.css admin.js admin-icons.js
 var adminAssets embed.FS
 
 type loginSession struct {
+	realm             string
 	state             string
 	client            *http.Client
 	created, nextPoll time.Time
@@ -44,6 +45,7 @@ type adminEvent struct {
 	Result string `json:"result"`
 }
 type adminServer struct {
+	usage               *server.UsageStore
 	pool                *pool.Pool
 	up                  *upstream.Client
 	api                 *server.Handler
@@ -122,6 +124,9 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case "/admin.css":
 			file = "admin.css"
 			contentType = "text/css; charset=utf-8"
+		case "/admin-theme.css":
+			file = "admin-theme.css"
+			contentType = "text/css; charset=utf-8"
 		case "/admin.js":
 			file = "admin.js"
 			contentType = "text/javascript; charset=utf-8"
@@ -168,6 +173,10 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	switch {
+	case r.Method == "GET" && r.URL.Path == "/api/usage":
+		a.usageList(w, r)
+	case r.Method == "POST" && r.URL.Path == "/api/tasks":
+		a.taskStatus(w, r)
 	case r.Method == "GET" && r.URL.Path == "/api/overview":
 		total, healthy, cooling, disabled, _ := a.pool.CountsDetailed()
 		adminJSON(w, map[string]any{"accounts": a.pool.List(), "total": total, "healthy": healthy, "cooling": cooling,

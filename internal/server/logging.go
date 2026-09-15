@@ -54,16 +54,17 @@ func (s *chatStat) done() {
 // 并记录首个 data 帧的 TTFB；原始字节原样返回给下游透传。
 // 注意：不做 rune 估算，token 数一律采信上游 usage。
 type chatStatsReader struct {
-	br        *bufio.Reader
-	start     time.Time
-	ttfb      time.Duration
-	seen      bool // 已见过首个 data 帧（TTFB 只记一次）
-	hasUsage  bool // 末帧是否带 usage
-	hasCredit bool // 是否出现过带 credit 的 usage（缺失≠0，见 Credit() 注释）
-	tokens    int
-	credit    float64 // 末帧 usage.credit（本次真实扣费，供成本账本）
-	prompt    int     // 末帧 usage.prompt_tokens（与 completion 合计折算单价）
-	pend      []byte  // 已读未返回的行缓存
+	br                      *bufio.Reader
+	start                   time.Time
+	ttfb                    time.Duration
+	seen                    bool // 已见过首个 data 帧（TTFB 只记一次）
+	hasUsage                bool // 末帧是否带 usage
+	hasCredit               bool // 是否出现过带 credit 的 usage（缺失≠0，见 Credit() 注释）
+	tokens                  int
+	credit                  float64 // 末帧 usage.credit（本次真实扣费，供成本账本）
+	prompt                  int     // 末帧 usage.prompt_tokens（与 completion 合计折算单价）
+	inputCount, outputCount *int
+	pend                    []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -101,8 +102,8 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	}
 	var chunk struct {
 		Usage *struct {
-			CompletionTokens int      `json:"completion_tokens"`
-			PromptTokens     int      `json:"prompt_tokens"`
+			CompletionTokens *int     `json:"completion_tokens"`
+			PromptTokens     *int     `json:"prompt_tokens"`
 			Credit           *float64 `json:"credit"` // 指针区分「缺失」与「显式 0」
 		} `json:"usage"`
 	}
@@ -110,8 +111,14 @@ func (s *chatStatsReader) parseSSELine(line string) {
 		return
 	}
 	s.hasUsage = true
-	s.tokens = chunk.Usage.CompletionTokens
-	s.prompt = chunk.Usage.PromptTokens
+	s.tokens, s.prompt = 0, 0
+	s.inputCount, s.outputCount = chunk.Usage.PromptTokens, chunk.Usage.CompletionTokens
+	if s.outputCount != nil {
+		s.tokens = *s.outputCount
+	}
+	if s.inputCount != nil {
+		s.prompt = *s.inputCount
+	}
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit

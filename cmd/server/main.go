@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -171,7 +172,16 @@ func main() {
 		log.Printf("夜猫子任务已启用：%v 点（task_runner.py ALL --yes --only black_cat）", cfg.Schedule.CatHours)
 	}
 
+	usageStore, err := server.NewUsageStore(filepath.Join(filepath.Dir(cfg.StateFile), "usage.json"))
+	var recordUsage func(server.UsageRecord)
+	if err != nil {
+		log.Print("usage metadata store unavailable; public API remains enabled")
+	} else {
+		defer usageStore.Close()
+		recordUsage = usageStore.Add
+	}
 	h := server.NewHandler(server.Config{
+		RecordUsage:  recordUsage,
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
@@ -205,6 +215,7 @@ func main() {
 	var adminSrv *http.Server
 	if cfg.AdminToken != "" {
 		admin := newAdminServer(p, up, h, cfg.AuthDir, *cfgPath, cfg.AdminToken)
+		admin.usage = usageStore
 		admin.event("管理服务", "已启动")
 		adminSrv = &http.Server{
 			Addr: cfg.AdminListen, Handler: admin,

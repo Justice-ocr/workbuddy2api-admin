@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -26,8 +28,11 @@ func (a *adminServer) loginStart(w http.ResponseWriter, r *http.Request) {
 	if !decodeAdmin(w, r, &req) {
 		return
 	}
-	if req.Realm != "global" || !auth.GlobalEnabled() {
-		adminError(w, 400, "仅支持已启用的国际版 global 登录")
+	if req.Realm == "" {
+		req.Realm = "global"
+	}
+	if (req.Realm != "global" && req.Realm != "cn") || (req.Realm == "global" && !auth.GlobalEnabled()) {
+		adminError(w, 400, "无效或未启用的账号版本")
 		return
 	}
 	a.pruneLogins()
@@ -36,16 +41,17 @@ func (a *adminServer) loginStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := a.oauthClient()
-	st, err := oauth.Begin(r.Context(), client, oauth.GlobalBase, oauth.GlobalBase)
-	if err != nil || !oauth.ValidGlobalURL(st.AuthURL) {
-		a.event("国际版授权", "发起失败")
-		adminError(w, 502, "国际版授权入口不可用")
+	base, origin := loginEndpoints(req.Realm)
+	st, err := oauth.Begin(r.Context(), client, base, origin)
+	if err != nil || !validLoginURL(req.Realm, st.AuthURL) {
+		a.event("账号授权", "发起失败")
+		adminError(w, 502, "授权入口不可用")
 		return
 	}
 	id := randomID()
-	a.logins[id] = &loginSession{state: st.State, client: client, created: time.Now()}
-	a.event("国际版授权", "等待授权")
-	adminJSON(w, map[string]any{"id": id, "url": st.AuthURL, "realm": "global", "expires_in": 900})
+	a.logins[id] = &loginSession{realm: req.Realm, state: st.State, client: client, created: time.Now()}
+	a.event("账号授权", "等待授权")
+	adminJSON(w, map[string]any{"id": id, "url": st.AuthURL, "realm": req.Realm, "expires_in": 900})
 }
 func (a *adminServer) loginCancel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -70,7 +76,7 @@ func (a *adminServer) loginPoll(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 410, "授权已过期或取消，请重新添加")
 		return
 	}
-	if !auth.GlobalEnabled() {
+	if s.realm == "global" && !auth.GlobalEnabled() {
 		adminError(w, 409, "国际版路由已关闭")
 		return
 	}
@@ -79,8 +85,9 @@ func (a *adminServer) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.nextPoll = time.Now().Add(2 * time.Second)
+	base, origin := loginEndpoints(s.realm)
 	if s.token == nil {
-		tok, err := oauth.PollToken(r.Context(), s.client, oauth.GlobalBase, oauth.GlobalBase, s.state)
+		tok, err := oauth.PollToken(r.Context(), s.client, base, origin, s.state)
 		if errors.Is(err, oauth.ErrPending) {
 			adminJSON(w, map[string]bool{"done": false})
 			return
@@ -97,7 +104,15 @@ func (a *adminServer) loginPoll(w http.ResponseWriter, r *http.Request) {
 		s.token = &tok
 	}
 	tok := s.token
-	info, err := oauth.ReadAccount(r.Context(), s.client, oauth.GlobalBase, oauth.GlobalBase, s.state, tok.AccessToken)
+	if tok.Domain != "" {
+		isGlobal := tok.Domain == "workbuddy.ai" || strings.HasSuffix(strings.ToLower(tok.Domain), ".workbuddy.ai")
+		if (s.realm == "cn" && isGlobal) || (s.realm == "global" && !isGlobal) {
+			delete(a.logins, req.ID)
+			adminError(w, 502, "凭据域与授权版本不匹配")
+			return
+		}
+	}
+	info, err := oauth.ReadAccount(r.Context(), s.client, base, origin, s.state, tok.AccessToken)
 	if err != nil || !validAdminUID(info.UID) {
 		adminError(w, 502, "账号信息获取失败")
 		return
@@ -118,7 +133,7 @@ func (a *adminServer) loginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, _ := json.Marshal(map[string]any{
 		"auth": map[string]any{"accessToken": tok.AccessToken, "refreshToken": tok.RefreshToken,
-			"expiresAt": time.Now().Unix() + tok.ExpiresIn, "domain": tok.Domain, "realm": "global"},
+			"expiresAt": time.Now().Unix() + tok.ExpiresIn, "domain": tok.Domain, "realm": s.realm},
 		"account": info,
 	})
 	if err := auth.CreateOnly(path, raw); err != nil {
@@ -130,8 +145,23 @@ func (a *adminServer) loginPoll(w http.ResponseWriter, r *http.Request) {
 	a.pool.Add(acct)
 	a.pool.Flush()
 	delete(a.logins, req.ID)
-	a.event("国际版账号", "添加成功")
-	adminJSON(w, map[string]any{"done": true, "uid": info.UID, "nickname": info.Nickname, "realm": "global"})
+	a.event("账号", "添加成功")
+	adminJSON(w, map[string]any{"done": true, "uid": info.UID, "nickname": info.Nickname, "realm": s.realm})
+}
+
+func loginEndpoints(realm string) (string, string) {
+	if realm == "cn" {
+		return oauth.CNBase, oauth.CNOrigin
+	}
+	return oauth.GlobalBase, oauth.GlobalBase
+}
+func validLoginURL(realm, raw string) bool {
+	if realm == "global" {
+		return oauth.ValidGlobalURL(raw)
+	}
+	u, err := url.Parse(raw)
+	return realm == "cn" && err == nil && u.Scheme == "https" && u.User == nil &&
+		(u.Host == "copilot.tencent.com" || u.Host == "www.codebuddy.cn")
 }
 
 func validAdminUID(s string) bool {
