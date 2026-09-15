@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -25,8 +26,16 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
-//go:embed admin.html admin.css admin-theme.css admin.js admin-icons.js
+//go:embed all:admin-dist
 var adminAssets embed.FS
+
+var adminStatic = func() http.Handler {
+	root, err := fs.Sub(adminAssets, "admin-dist")
+	if err != nil {
+		panic("admin assets unavailable")
+	}
+	return http.FileServer(http.FS(root))
+}()
 
 type loginSession struct {
 	realm             string
@@ -46,6 +55,7 @@ type adminEvent struct {
 }
 type adminServer struct {
 	usage               *server.UsageStore
+	taskObservations    *taskObservationStore
 	pool                *pool.Pool
 	up                  *upstream.Client
 	api                 *server.Handler
@@ -90,7 +100,7 @@ func loopbackHost(host string) bool {
 }
 
 func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -115,31 +125,9 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 403, "已拒绝跨站请求")
 		return
 	}
-	if r.Method == http.MethodGet {
-		file, contentType := "", ""
-		switch r.URL.Path {
-		case "/":
-			file = "admin.html"
-			contentType = "text/html; charset=utf-8"
-		case "/admin.css":
-			file = "admin.css"
-			contentType = "text/css; charset=utf-8"
-		case "/admin-theme.css":
-			file = "admin-theme.css"
-			contentType = "text/css; charset=utf-8"
-		case "/admin.js":
-			file = "admin.js"
-			contentType = "text/javascript; charset=utf-8"
-		case "/admin-icons.js":
-			file = "admin-icons.js"
-			contentType = "text/javascript; charset=utf-8"
-		}
-		if file != "" {
-			raw, _ := adminAssets.ReadFile(file)
-			w.Header().Set("Content-Type", contentType)
-			_, _ = w.Write(raw)
-			return
-		}
+	if r.Method == http.MethodGet && !strings.HasPrefix(r.URL.Path, "/api/") {
+		adminStatic.ServeHTTP(w, r)
+		return
 	}
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		http.NotFound(w, r)
@@ -175,6 +163,8 @@ func (a *adminServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "GET" && r.URL.Path == "/api/usage":
 		a.usageList(w, r)
+	case r.Method == "GET" && r.URL.Path == "/api/usage/export":
+		a.usageExport(w, r)
 	case r.Method == "POST" && r.URL.Path == "/api/tasks":
 		a.taskStatus(w, r)
 	case r.Method == "GET" && r.URL.Path == "/api/overview":

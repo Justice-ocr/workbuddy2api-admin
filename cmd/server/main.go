@@ -216,6 +216,12 @@ func main() {
 	if cfg.AdminToken != "" {
 		admin := newAdminServer(p, up, h, cfg.AuthDir, *cfgPath, cfg.AdminToken)
 		admin.usage = usageStore
+		taskObservations, taskObservationErr := newTaskObservationStore(filepath.Join(filepath.Dir(cfg.StateFile), "task-observations.json"))
+		if taskObservationErr != nil {
+			log.Print("task observation store unavailable; task snapshots remain readable")
+		} else {
+			admin.taskObservations = taskObservations
+		}
 		admin.event("管理服务", "已启动")
 		adminSrv = &http.Server{
 			Addr: cfg.AdminListen, Handler: admin,
