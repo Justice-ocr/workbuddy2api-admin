@@ -6,7 +6,8 @@ services:
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "7863:7863"
+      - "127.0.0.1:7863:7863"
+      - "127.0.0.1:7864:7864"
     volumes:
       - ./auths:/app/auths
       # data 保持 bind mount（本地映射，与旧版本一致）。

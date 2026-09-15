@@ -122,10 +122,10 @@ func (p *Pool) SetStore(s StoreSnapshotter) {
 // 同时打一条恢复来源日志。必须在 SyncToDir 之前调用（SyncToDir 只增删不入值）。
 func (p *Pool) Acquire(uid string) bool {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
 	e, ok := p.byUID[uid]
 	limit := p.maxInFlight
-	p.mu.RUnlock()
-	if !ok {
+	if !ok || e.disabled {
 		return false
 	}
 	if limit <= 0 {

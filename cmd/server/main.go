@@ -202,12 +202,33 @@ func main() {
 		// （长流式生成合法时长可达数分钟，全局 WriteTimeout 会误杀在途 SSE）。
 		IdleTimeout: 120 * time.Second,
 	}
+	var adminSrv *http.Server
+	if cfg.AdminToken != "" {
+		admin := newAdminServer(p, up, h, cfg.AuthDir, *cfgPath, cfg.AdminToken)
+		admin.event("管理服务", "已启动")
+		adminSrv = &http.Server{
+			Addr: cfg.AdminListen, Handler: admin,
+			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+			WriteTimeout: 150 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10,
+		}
+		go func() {
+			log.Printf("admin panel listening on %s", cfg.AdminListen)
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("admin panel stopped: %v", err)
+			}
+		}()
+	} else {
+		log.Printf("admin panel disabled: admin_token is empty")
+	}
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
+		if adminSrv != nil {
+			_ = adminSrv.Shutdown(shutdownCtx)
+		}
 	}()
 
 	if cfg.Global.Enabled {

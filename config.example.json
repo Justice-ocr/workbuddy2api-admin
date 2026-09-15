@@ -1,5 +1,9 @@
 {
   "listen": ":7863",
+  "admin_listen": "127.0.0.1:7864",
+  "admin_token": "",
+  "admin_token_file": "",
+  "admin_allow_container_bind": false,
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",

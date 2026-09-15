@@ -19,7 +19,8 @@ import (
 // Auth 是归一化后的账号凭证（来源可以是插件 OAuth 嵌套形或手写扁平形）。
 type Auth struct {
 	// mu 串行化 RefreshToken 写与 SaveAtomic 读，防止并发写回半更新 token。
-	mu sync.Mutex
+	mu      sync.Mutex
+	deleted bool
 
 	AccessToken  string
 	RefreshToken string
@@ -30,11 +31,11 @@ type Auth struct {
 	//
 	// 命名注记：Go 不允许字段与方法同名，持久化字段用未导出 realm，计算访问器用
 	// 导出的 Realm()（跨包调用全部走方法）。Parse/SaveAtomic/login 在包内读写字段。
-	realm          string
-	UID            string
-	EnterpriseID   string
-	Nickname       string
-	FilePath       string // 来源文件；refresh 后原子写回此处
+	realm        string
+	UID          string
+	EnterpriseID string
+	Nickname     string
+	FilePath     string // 来源文件；refresh 后原子写回此处
 
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
@@ -211,6 +212,9 @@ func Parse(raw []byte) (*Auth, error) {
 func (a *Auth) SaveAtomic() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.deleted {
+		return fmt.Errorf("credential has been deleted")
+	}
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return fmt.Errorf("save refused: empty accessToken (uid=%s)", a.UID)
 	}
@@ -245,6 +249,44 @@ func (a *Auth) SaveAtomic() error {
 		return err
 	}
 	return os.Rename(tmp, a.FilePath)
+}
+
+// CreateOnly publishes a fully written credential without replacing an existing file.
+func CreateOnly(path string, raw []byte) error {
+	if _, err := Parse(raw); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".oauth-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err = f.Chmod(0o600); err == nil {
+		_, err = f.Write(raw)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Link(f.Name(), path)
+}
+
+// DeleteCredential prevents a scheduler holding an old pointer from recreating the file.
+// The caller must first verify that FilePath is an owned credential path.
+func (a *Auth) DeleteCredential() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := os.Remove(a.FilePath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	a.deleted = true
+	return nil
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。

@@ -15,10 +15,14 @@ import (
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
-	AuthDir   string `json:"auth_dir"`   // ./auths
-	StateFile string `json:"state_file"` // ./data/state.json
+	Listen                  string `json:"listen"`  // ":7863"
+	APIKey                  string `json:"api_key"` // 空 = 不鉴权
+	AdminListen             string `json:"admin_listen"`
+	AdminToken              string `json:"admin_token"`
+	AdminTokenFile          string `json:"admin_token_file"`
+	AdminAllowContainerBind bool   `json:"admin_allow_container_bind"`
+	AuthDir                 string `json:"auth_dir"`   // ./auths
+	StateFile               string `json:"state_file"` // ./data/state.json
 
 	Server struct {
 		// MaxBodyMB 聊天请求体大小上限（单位 MB，默认 8）。
@@ -144,10 +148,11 @@ type Config struct {
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
-		Listen:    ":7863",
-		APIKey:    "",
-		AuthDir:   "./auths",
-		StateFile: "./data/state.json",
+		Listen:      ":7863",
+		APIKey:      "",
+		AdminListen: "127.0.0.1:7864",
+		AuthDir:     "./auths",
+		StateFile:   "./data/state.json",
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
@@ -206,6 +211,18 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_API_KEY"); v != "" {
 		c.APIKey = v
+	}
+	if v := os.Getenv("WB2A_ADMIN_LISTEN"); v != "" {
+		c.AdminListen = v
+	}
+	if v := os.Getenv("WB2A_ADMIN_TOKEN"); v != "" {
+		c.AdminToken = v
+	}
+	if v := os.Getenv("WB2A_ADMIN_TOKEN_FILE"); v != "" {
+		c.AdminTokenFile = v
+	}
+	if v := os.Getenv("WB2A_ADMIN_ALLOW_CONTAINER_BIND"); v != "" {
+		c.AdminAllowContainerBind = v == "true"
 	}
 	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
 		c.AuthDir = v
@@ -279,6 +296,9 @@ func applyEnv(c *Config) {
 }
 
 func (c *Config) normalize() error {
+	if err := c.validateAdmin(); err != nil {
+		return err
+	}
 	var err error
 	// max_body_mb 非法（0/负数）直接报错：0 若被静默当成默认 8MB，用户以为"不限"，
 	// 大请求又被静默 413——不如 fail fast 提示显式配大上限。

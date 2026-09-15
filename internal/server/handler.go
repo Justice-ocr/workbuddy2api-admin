@@ -2,6 +2,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -64,6 +67,7 @@ const ServiceName = "workbuddy2api"
 
 // Handler 主路由。
 type Handler struct {
+	apiKey  atomic.Value
 	cfg     Config
 	mux     *http.ServeMux
 	degrade degradeGate
@@ -87,6 +91,7 @@ func NewHandler(cfg Config) *Handler {
 		cfg.MaxBodyBytes = 8 << 20 // 请求体上限兜底 8MB
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h.apiKey.Store(cfg.APIKey)
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
@@ -100,9 +105,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
+		if key := h.apiKey.Load().(string); key != "" {
 			authz := r.Header.Get("Authorization")
-			if !strings.HasPrefix(authz, "Bearer ") || strings.TrimPrefix(authz, "Bearer ") != h.cfg.APIKey {
+			got, want := sha256.Sum256([]byte(strings.TrimPrefix(authz, "Bearer "))), sha256.Sum256([]byte(key))
+			if !strings.HasPrefix(authz, "Bearer ") || subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
