@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1
+FROM node:22-alpine AS web
+WORKDIR /src/web/admin
+RUN corepack enable
+COPY web/admin/package.json web/admin/pnpm-lock.yaml web/admin/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web/admin/ ./
+RUN pnpm build
+
 FROM golang:1.23-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
+COPY --from=web /src/cmd/server/admin-dist ./cmd/server/admin-dist
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \

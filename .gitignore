@@ -19,6 +19,9 @@ config.json
 # Build artifacts
 *.tmp
 __pycache__/
+web/admin/node_modules/
+web/admin/.astro/
+web/admin/dist/
 
 # Backups (contains auth tokens)
 backups/
